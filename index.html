@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <title>📇 Gestor de Tarjetas OCR</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        * { -webkit-tap-highlight-color: transparent; }
+        @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        .animate-spin { animation: spin 1s linear infinite; }
+        .animate-pulse { animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .5; } }
+    </style>
+</head>
+<body class="bg-gradient-to-br from-blue-50 to-indigo-100 min-h-screen">
+    <div id="app"></div>
+
+    <script>
+        let state = {
+            image: null,
+            data: null,
+            loading: false,
+            error: '',
+            color: '#3B82F6',
+            savedCards: [],
+            companies: [],
+            searchTerm: '',
+            viewMode: 'upload',
+            selectedCard: null,
+            showSaveModal: false,
+            selectedCompany: '',
+            newCompany: '',
+            deleteConfirm: null,
+            successMessage: '',
+            fullscreenImage: null
+        };
+
+        const colorOptions = [
+            { name: 'Azul', value: '#3B82F6' },
+            { name: 'Verde', value: '#10B981' },
+            { name: 'Púrpura', value: '#8B5CF6' },
+            { name: 'Rojo', value: '#EF4444' },
+            { name: 'Naranja', value: '#F97316' }
+        ];
+
+        function loadData() {
+            try {
+                const saved = localStorage.getItem('businessCards');
+                const savedCompanies = localStorage.getItem('companies');
+                if (saved) state.savedCards = JSON.parse(saved);
+                if (savedCompanies) state.companies = JSON.parse(savedCompanies);
+            } catch (e) {}
+        }
+
+        function saveData() {
+            try {
+                localStorage.setItem('businessCards', JSON.stringify(state.savedCards));
+                localStorage.setItem('companies', JSON.stringify(state.companies));
+            } catch (e) {}
+        }
+
+        async function processImage(imageData) {
+            state.loading = true;
+            state.error = '';
+            render();
+
+            try {
+                const parts = imageData.split(',');
+                const base64Data = parts[1];
+                const mimeMatch = parts[0].match(/:(.*?);/);
+                const mimeType = mimeMatch ? mimeMatch[1] : 'image/jpeg';
+
+                const response = await fetch("https://api.anthropic.com/v1/messages", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        model: "claude-sonnet-4-20250514",
+                        max_tokens: 2000,
+                        messages: [{
+                            role: "user",
+                            content: [
+                                { type: "image", source: { type: "base64", media_type: mimeType, data: base64Data } },
+                                { type: "text", text: 'Extrae datos de esta tarjeta. Responde SOLO con JSON: {"nombre": "","cargo": "","empresa": "","telefono": "","email": "","web": "","direccion": ""}' }
+                            ]
+                        }]
+                    })
+                });
+
+                if (!response.ok) throw new Error(`Error ${response.status}`);
+
+                const result = await response.json();
+                let text = result.content[0].text.trim();
+                text = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').replace(/^[^{]*/, '').replace(/[^}]*$/, '');
+                state.data = JSON.parse(text);
+            } catch (e) {
+                state.error = `Error: ${e.message}`;
+            } finally {
+                state.loading = false;
+                render();
+            }
+        }
+
+        function handleFile(event) {
+            const file = event.target.files?.[0];
+            if (!file) return;
+
+            if (!file.type.startsWith('image/')) {
+                state.error = 'Selecciona una imagen válida';
+                render();
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                state.image = e.target.result;
+                render();
+                processImage(e.target.result);
+            };
+            reader.onerror = () => {
+                state.error = 'Error al leer el archivo';
+                render();
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function saveCard() {
+            if (!state.data) return;
+
+            let companyToSave = state.selectedCompany;
+            if (state.selectedCompany === '__new__' && state.newCompany.trim()) {
+                companyToSave = state.newCompany.trim();
+                if (!state.companies.includes(companyToSave)) {
+                    state.companies.push(companyToSave);
+                }
+            }
+
+            const newCard = {
+                id: Date.now(),
+                ...state.data,
+                empresaAsignada: companyToSave,
+                color: state.color,
+                fecha: new Date().toISOString(),
+                imagen: state.image
+            };
+
+            state.savedCards.unshift(newCard);
+            state.showSaveModal = false;
+            state.selectedCompany = '';
+            state.newCompany = '';
+            state.error = '';
+            state.successMessage = '✓ Tarjeta guardada correctamente';
+            saveData();
+            render();
+            setTimeout(() => { state.successMessage = ''; render(); }, 3000);
+        }
+
+        function deleteCard(id) {
+            state.savedCards = state.savedCards.filter(card => card.id !== id);
+            if (state.selectedCard?.id === id) state.selectedCard = null;
+            state.deleteConfirm = null;
+            state.successMessage = '✓ Tarjeta eliminada';
+            saveData();
+            render();
+            setTimeout(() => { state.successMessage = ''; render(); }, 3000);
+        }
+
+        function downloadCard(cardData) {
+            const canvas = document.createElement('canvas');
+            canvas.width = 1000;
+            canvas.height = 600;
+            const ctx = canvas.getContext('2d');
+
+            ctx.fillStyle = '#ffffff';
+            ctx.fillRect(0, 0, 1000, 600);
+            ctx.fillStyle = cardData.color || state.color;
+            ctx.fillRect(0, 0, 1000, 180);
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 42px Arial';
+            ctx.fillText(cardData.nombre || '', 40, 70);
+            ctx.font = '26px Arial';
+            ctx.fillText(cardData.cargo || '', 40, 120);
+            ctx.strokeStyle = cardData.color || state.color;
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(40, 210);
+            ctx.lineTo(960, 210);
+            ctx.stroke();
+            ctx.fillStyle = cardData.color || state.color;
+            ctx.font = 'bold 34px Arial';
+            ctx.fillText(cardData.empresa || '', 40, 270);
+            ctx.fillStyle = '#374151';
+            ctx.font = '22px Arial';
+            let y = 330;
+            if (cardData.telefono) { ctx.fillText('Tel: ' + cardData.telefono, 40, y); y += 45; }
+            if (cardData.email) { ctx.fillText('Email: ' + cardData.email, 40, y); y += 45; }
+            if (cardData.web) { ctx.fillText('Web: ' + cardData.web, 40, y); }
+            if (cardData.direccion) { ctx.fillStyle = '#6B7280'; ctx.font = '20px Arial'; ctx.fillText(cardData.direccion, 40, 520); }
+
+            try {
+                const link = document.createElement('a');
+                link.download = `tarjeta-${cardData.nombre || 'comercial'}.png`;
+                link.href = canvas.toDataURL('image/png');
+                link.click();
+                state.successMessage = '✓ Tarjeta descargada';
+                render();
+                setTimeout(() => { state.successMessage = ''; render(); }, 3000);
+            } catch (e) {
+                state.error = 'Error al descargar';
+                render();
+            }
+        }
+
+        function getFilteredCards() {
+            const search = state.searchTerm.toLowerCase();
+            return state.savedCards.filter(card => 
+                card.nombre?.toLowerCase().includes(search) ||
+                card.empresa?.toLowerCase().includes(search) ||
+                card.empresaAsignada?.toLowerCase().includes(search) ||
+                card.cargo?.toLowerCase().includes(search) ||
+                card.email?.toLowerCase().includes(search) ||
+                card.telefono?.includes(search)
+            );
+        }
+
+        function getCardsByCompany() {
+            const filtered = getFilteredCards();
+            return filtered.reduce((acc, card) => {
+                const company = card.empresaAsignada || 'Sin empresa';
+                if (!acc[company]) acc[company] = [];
+                acc[company].push(card);
+                return acc;
+            }, {});
+        }
+
+        function render() {
+            const app = document.getElementById('app');
+            const filteredCards = getFilteredCards();
+            const cardsByCompany = getCardsByCompany();
+
+            app.innerHTML = `
+                <div class="p-4 md:p-6">
+                    <div class="mb-8">
+                        <h1 class="text-3xl md:text-4xl font-bold text-gray-800 mb-4 text-center">
+                            📇 Gestor de Tarjetas OCR
+                        </h1>
+                        
+                        <div class="flex justify-center gap-3 mb-4">
+                            <button onclick="changeView('upload')" class="px-6 py-3 rounded-lg font-semibold flex items-center gap-2 transition-all ${
+                                state.viewMode === 'upload' 
+                                    ? 'bg-blue-600 text-white shadow-lg' 
+                                    : 'bg-white text-gray-700 hover:bg-gray-50'
+                            }">
+                                <span>📸</span>
+                                Escanear Nueva (${state.savedCards.length})
+                            </button>
+                            <button onclick="changeView('list')" class="px-6 py-3 rounded-lg font-semibold flex items-center gap-2 transition-all ${
+                                state.viewMode === 'list' 
+                                    ? 'bg-blue-600 text-white shadow-lg' 
+                                    : 'bg-white text-gray-700 hover:bg-gray-50'
+                            }">
+                                <span>🏢</span>
+                                Ver Guardadas
+                            </button>
+                        </div>
+                    </div>
+
+                    ${state.successMessage ? `
+                        <div class="bg-green-100 border-2 border-green-500 rounded-lg p-4 mb-6 text-green-800 font-semibold text-center animate-pulse">
+                            ${state.successMessage}
+                        </div>
+                    ` : ''}
+
+                    ${state.viewMode === 'upload' ? `
+                        ${!state.image ? `
+                            <div class="max-w-xl mx-auto">
+                                <div class="border-4 border-dashed border-blue-400 rounded-2xl p-16 text-center cursor-pointer hover:border-blue-600 hover:bg-white transition-all bg-white/80 backdrop-blur shadow-xl">
+                                    <div class="text-6xl mb-4">📸</div>
+                                    <h3 class="text-xl font-semibold mb-2">Sube una tarjeta</h3>
+                                    <p class="text-gray-500 mb-4">JPG, PNG, JPEG</p>
+                                    
+                                    <div class="space-y-3">
+                                        <label class="inline-block bg-blue-600 hover:bg-blue-700 text-white px-8 py-3 rounded-lg font-semibold cursor-pointer transition-colors">
+                                            📷 Tomar Foto
+                                            <input type="file" accept="image/*" capture="environment" onchange="handleFile(event)" class="hidden">
+                                        </label>
+                                        
+                                        <div class="text-sm text-gray-500">o</div>
+                                        
+                                        <label class="inline-block bg-indigo-600 hover:bg-indigo-700 text-white px-8 py-3 rounded-lg font-semibold cursor-pointer transition-colors">
+                                            🖼️ Galería
+                                            <input type="file" accept="image/*" onchange="handleFile(event)" class="hidden">
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+                        ` : `
+                            <div class="space-y-6">
+                                <div class="flex justify-center gap-3 flex-wrap">
+                                    <button onclick="reset()" class="bg-gray-600 hover:bg-gray-700 text-white px-6 py-2 rounded-lg flex items-center gap-2">
+                                        <span>🔄</span> Otra
+                                    </button>
+                                    ${state.data && !state.loading ? `
+                                        <button onclick="openSaveModal()" class="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg flex items-center gap-2">
+                                            <span>💾</span> Guardar
+                                        </button>
+                                        <button onclick="downloadCard(state.data)" class="bg-green-600 hover:bg-green-700 text-white px-6 py-2 rounded-lg flex items-center gap-2">
+                                            <span>📥</span> Descargar
+                                        </button>
+                                    ` : ''}
+                                </div>
+
+                                ${state.error ? `
+                                    <div class="bg-red-100 border border-red-300 rounded-lg p-4 text-red-800">
+                                        ${state.error}
+                                    </div>
+                                ` : ''}
+
+                                <div class="grid md:grid-cols-2 gap-6">
+                                    <div class="bg-white rounded-lg p-5 shadow">
+                                        <h3 class="font-bold mb-3">Imagen</h3>
+                                        <img src="${state.image}" class="w-full rounded">
+                                    </div>
+
+                                    <div class="bg-white rounded-lg p-5 shadow">
+                                        <h3 class="font-bold mb-3">Datos</h3>
+                                        ${state.loading ? `
+                                            <div class="flex flex-col items-center justify-center h-64">
+                                                <div class="animate-spin text-blue-600 mb-3" style="font-size: 40px;">⟳</div>
+                                                <p class="text-gray-600">Procesando...</p>
+                                            </div>
+                                        ` : state.data ? `
+                                            <div class="space-y-2">
+                                                ${Object.entries(state.data).map(([k, v]) => 
+                                                    v ? `
+                                                        <div class="bg-gray-50 p-3 rounded">
+                                                            <div class="text-xs text-gray-500 uppercase">${k}</div>
+                                                            <div class="font-medium break-words">${v}</div>
+                                                        </div>
+                                                    ` : ''
+                                                ).join('')}
+                                            </div>
+                                        ` : ''}
+                                    </div>
+                                </div>
+
+                                ${state.data && !state.loading ? `
+                                    <div class="bg-white rounded-lg p-6 shadow">
+                                        <h3 class="font-bold mb-4">Vista Previa</h3>
+                                        
+                                        <div class="flex gap-2 mb-6">
+                                            ${colorOptions.map(c => `
+                                                <button 
+                                                    onclick="changeColor('${c.value}')"
+                                                    class="w-12 h-12 rounded-lg transition-all ${
+                                                        state.color === c.value ? 'ring-4 ring-blue-400 scale-110' : ''
+                                                    }"
+                                                    style="background-color: ${c.value}"
+                                                ></button>
+                                            `).join('')}
+                                        </div>
+
+                                        <div class="max-w-3xl mx-auto bg-white rounded-xl shadow-xl overflow-hidden">
+                                            <div class="p-8" style="background-color: ${state.color}">
+                                                <h2 class="text-3xl font-bold text-white mb-2">${state.data.nombre}</h2>
+                                                <p class="text-white text-lg opacity-90">${state.data.cargo}</p>
+                                            </div>
+
+                                            <div class="p-8">
+                                                <div class="text-2xl font-bold mb-6" style="color: ${state.color}">${state.data.empresa}</div>
+
+                                                <div class="space-y-2 text-gray-700">
+                                                    ${state.data.telefono ? `<div>📞 ${state.data.telefono}</div>` : ''}
+                                                    ${state.data.email ? `<div>✉️ ${state.data.email}</div>` : ''}
+                                                    ${state.data.web ? `<div>🌐 ${state.data.web}</div>` : ''}
+                                                    ${state.data.direccion ? `<div class="mt-4 text-gray-600">📍 ${state.data.direccion}</div>` : ''}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                ` : ''}
+                            </div>
+                        `}
+                    ` : `
+                        <div class="space-y-6">
+                            <div class="bg-white rounded-xl p-4 shadow">
+                                <div class="relative">
+                                    <span class="absolute left-3 top-3 text-gray-400">🔍</span>
+                                    <input 
+                                        type="text" 
+                                        placeholder="Buscar..."
+                                        value="${state.searchTerm}"
+                                        oninput="updateSearch(event.target.value)"
+                                        class="w-full pl-10 pr-4 py-3 border-2 rounded-lg"
+                                    >
+                                </div>
+                                <p class="text-sm text-gray-600 mt-2">${filteredCards.length} encontradas</p>
+                            </div>
+
+                            ${filteredCards.length === 0 ? `
+                                <div class="bg-white rounded-xl p-12 text-center">
+                                    <p class="text-gray-500">No hay tarjetas</p>
+                                </div>
+                            ` : `
+                                <div class="space-y-6">
+                                    ${Object.entries(cardsByCompany).map(([company, cards]) => `
+                                        <div class="bg-white rounded-xl p-5 shadow">
+                                            <h3 class="text-xl font-bold mb-4">${company} (${cards.length})</h3>
+                                            <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                                ${cards.map(card => `
+                                                    <div class="border-2 rounded-lg overflow-hidden hover:border-blue-400 cursor-pointer transition-all"
+                                                         onclick="openCard(${card.id})">
+                                                        ${card.imagen ? `
+                                                            <div class="h-40 bg-gray-100 relative flex items-center justify-center group"
+                                                                 onclick="event.stopPropagation(); openFullscreen('${card.imagen}')">
+                                                                <img src="${card.imagen}" class="max-w-full max-h-full object-contain group-hover:scale-105 transition-transform">
+                                                                <div class="absolute top-2 right-2 bg-green-500 text-white px-2 py-1 rounded-full text-xs font-bold">
+                                                                    📸 Foto
+                                                                </div>
+                                                                <div class="absolute inset-0 bg-black bg-opacity-0 group-hover:bg-opacity-20 transition-all flex items-center justify-center">
+                                                                    <span class="text-white opacity-0 group-hover:opacity-100 font-bold">🔍 Ver</span>
+                                                                </div>
+                                                            </div>
+                                                        ` : `
+                                                            <div class="h-40 bg-gray-200 flex items-center justify-center">
+                                                                <span class="text-gray-400 text-sm">Sin imagen</span>
+                                                            </div>
+                                                        `}
+                                                        <div class="p-3">
+                                                            <div class="flex justify-between mb-2">
+                                                                <div>
+                                                                    <h4 class="font-bold text-sm">${card.nombre || 'Sin nombre'}</h4>
+                                                                    <p class="text-sm text-gray-600">${card.cargo || ''}</p>
+                                                                    <p class="text-sm text-gray-500">${card.empresa || ''}</p>
+                                                                </div>
+                                                                <button onclick="event.stopPropagation(); confirmDelete(${card.id})" class="text-red-500 h-8">
+                                                                    🗑️
+                                                                </button>
+                                                            </div>
+                                                            <div class="text-sm space-y-1">
+                                                                ${card.telefono ? `<div>☎ ${card.telefono}</div>` : ''}
+                                                                ${card.email ? `<div class="break-all">✉ ${card.email}</div>` : ''}
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                `).join('')}
+                                            </div>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            `}
+                        </div>
+                    `}
+                </div>
+
+                ${state.showSaveModal ? `
+                    <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50" onclick="closeSaveModal()">
+                        <div class="bg-white rounded-2xl p-6 max-w-md w-full" onclick="event.stopPropagation()">
+                            <h3 class="text-2xl font-bold mb-4">Guardar Tarjeta</h3>
+                            <div class="space-y-3">
+                                <div>
+                                    <label class="block text-sm font-bold mb-2">Empresa:</label>
+                                    <select onchange="updateSelectedCompany(event.target.value)" class="w-full p-2 border-2 rounded-lg text-sm">
+                                        <option value="">Selecciona...</option>
+                                        ${state.companies.map(c => `
+                                            <option value="${c}" ${state.selectedCompany === c ? 'selected' : ''}>${c}</option>
+                                        `).join('')}
+                                        <option value="__new__" ${state.selectedCompany === '__new__' ? 'selected' : ''}>+ Nueva empresa</option>
+                                    </select>
+                                </div>
+                                ${state.selectedCompany === '__new__' ? `
+                                    <div>
+                                        <label class="block text-sm font-bold mb-2">Nombre:</label>
+                                        <input type="text" value="${state.newCompany}"
+                                               oninput="updateNewCompany(event.target.value)"
+                                               placeholder="Ej: Acme Corp"
+                                               class="w-full p-2 border-2 rounded-lg text-sm">
+                                    </div>
+                                ` : ''}
+                            </div>
+                            <div class="flex gap-3 mt-6">
+                                <button onclick="closeSaveModal()" class="flex-1 bg-gray-300 px-4 py-2 rounded-lg font-semibold text-sm">
+                                    Cancelar
+                                </button>
+                                <button onclick="saveCard()" 
+                                        ${!state.selectedCompany || (state.selectedCompany === '__new__' && !state.newCompany.trim()) ? 'disabled' : ''}
+                                        class="flex-1 bg-blue-600 text-white px-4 py-2 rounded-lg font-semibold text-sm disabled:opacity-50">
+                                    Guardar
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                ` : ''}
+
+                ${state.deleteConfirm ? `
+                    <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50" onclick="cancelDelete()">
+                        <div class="bg-white rounded-2xl p-6 max-w-md w-full" onclick="event.stopPropagation()">
+                            <h3 class="text-xl font-bold text-red-600 mb-4">⚠️ Confirmar</h3>
+                            <p class="text-gray-700 mb-6 text-sm">¿Eliminar esta tarjeta?</p>
+                            <div class="flex gap-3">
+                                <button onclick="cancelDelete()" class="flex-1 bg-gray-300 px-4 py-2 rounded-lg font-semibold text-sm">
+                                    Cancelar
+                                </button>
+                                <button onclick="deleteCard(${state.deleteConfirm})" class="flex-1 bg-red-600 text-white px-4 py-2 rounded-lg font-semibold text-sm">
+                                    Eliminar
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                ` : ''}
+
+                ${state.selectedCard ? `
+                    <div class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50 overflow-y-auto" onclick="closeCard()">
+                        <div class="bg-white rounded-2xl p-6 max-w-6xl w-full max-h-[95vh] overflow-y-auto my-4" onclick="event.stopPropagation()">
+                            <div class="flex justify-between mb-4">
+                                <h3 class="text-2xl font-bold">📸 Detalle</h3>
+                                <button onclick="closeCard()" class="text-gray-500 hover:text-gray-700">✕</button>
+                            </div>
+                            <div class="${state.selectedCard.imagen ? 'grid md:grid-cols-2 gap-6' : ''}">
+                                ${state.selectedCard.imagen ? `
+                                    <div>
+                                        <h4 class="font-bold text-gray-700 mb-3">Imagen (clic para ampliar):</h4>
+                                        <div class="bg-gray-50 rounded-lg p-4 border-2 cursor-zoom-in hover:border-blue-400 transition-all"
+                                             onclick="openFullscreen('${state.selectedCard.imagen}')">
+                                            <img src="${state.selectedCard.imagen}" class="w-full rounded-lg">
+                                        </div>
+                                    </div>
+                                ` : ''}
+                                <div>
+                                    <h4 class="font-bold text-gray-700 mb-3">Datos:</h4>
+                                    <div class="space-y-3">
+                                        <div class="bg-blue-50 p-3 rounded">
+                                            <div class="text-xs text-blue-600 font-bold">EMPRESA</div>
+                                            <div class="font-bold">${state.selectedCard.empresaAsignada || 'Sin asignar'}</div>
+                                        </div>
+                                        ${Object.entries(state.selectedCard).filter(([k]) => 
+                                            !['id', 'fecha', 'color', 'imagen', 'empresaAsignada'].includes(k)
+                                        ).map(([k, v]) => v ? `
+                                            <div class="bg-gray-50 p-3 rounded text-sm">
+                                                <div class="text-xs text-gray-500 uppercase">${k}</div>
+                                                <div class="font-medium break-words">${v}</div>
+                                            </div>
+                                        ` : '').join('')}
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="flex gap-2 mt-6">
+                                <button onclick="downloadCard(state.selectedCard)" class="flex-1 bg-green-600 text-white px-4 py-2 rounded-lg text-sm">
+                                    📥 Descargar
+                                </button>
+                                <button onclick="confirmDelete(${state.selectedCard.id})" class="flex-1 bg-red-600 text-white px-4 py-2 rounded-lg text-sm">
+                                    🗑️ Eliminar
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                ` : ''}
+
+                ${state.fullscreenImage ? `
+                    <div class="fixed inset-0 bg-black bg-opacity-95 flex items-center justify-center p-4 z-50" onclick="closeFullscreen()">
+                        <button class="absolute top-4 right-4 text-white bg-black bg-opacity-50 rounded-full p-3" onclick="closeFullscreen()">
+                            ✕
+                        </button>
+                        <img src="${state.fullscreenImage}" class="max-w-full max-h-full object-contain" onclick="event.stopPropagation()">
+                        <div class="absolute bottom-4 bg-black bg-opacity-70 text-white px-4 py-2 rounded-full text-xs">
+                            Toca fuera para cerrar
+                        </div>
+                    </div>
+                ` : ''}
+            `;
+        }
+
+        window.handleFile = handleFile;
+        window.changeView = (view) => { state.viewMode = view; render(); };
+        window.reset = () => { state.image = null; state.data = null; state.error = ''; render(); };
+        window.openSaveModal = () => { state.showSaveModal = true; render(); };
+        window.closeSaveModal = () => { state.showSaveModal = false; state.selectedCompany = ''; state.newCompany = ''; render(); };
+        window.updateSelectedCompany = (val) => { state.selectedCompany = val; render(); };
+        window.updateNewCompany = (val) => { state.newCompany = val; render(); };
+        window.saveCard = saveCard;
+        window.downloadCard = downloadCard;
+        window.changeColor = (col) => { state.color = col; render(); };
+        window.updateSearch = (val) => { state.searchTerm = val; render(); };
+        window.confirmDelete = (id) => { state.deleteConfirm = id; render(); };
+        window.cancelDelete = () => { state.deleteConfirm = null; render(); };
+        window.deleteCard = deleteCard;
+        window.openCard = (id) => { state.selectedCard = state.savedCards.find(c => c.id === id); render(); };
+        window.closeCard = () => { state.selectedCard = null; render(); };
+        window.openFullscreen = (img) => { state.fullscreenImage = img; render(); };
+        window.closeFullscreen = () => { state.fullscreenImage = null; render(); };
+
+        loadData();
+        render();
+    </script>
+</body>
+</html>
